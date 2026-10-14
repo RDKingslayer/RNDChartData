@@ -1,0 +1,16 @@
+# Assets for the COEP demo. They are loaded cross-origin (localhost <-> 127.0.0.1), so only the files
+# that opt in below survive a page served with Cross-Origin-Embedder-Policy: require-corp.
+<IfModule mod_headers.c>
+    # Avoid cached responses hiding header changes while experimenting
+    Header set Cache-Control "no-store"
+
+    # Opts in to being embedded by any origin in no-cors mode (<script>, <img> without crossorigin)
+    <Files "corp.*">
+        Header set Cross-Origin-Resource-Policy "cross-origin"
+    </Files>
+
+    # Opts in through CORS instead (<script crossorigin>, fetch() in cors mode)
+    <Files "cors.*">
+        Header set Access-Control-Allow-Origin "*"
+    </Files>
+</IfModule>

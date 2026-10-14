@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>COEP Blocking Demo</title>
+    <style>
+        body { font-family: sans-serif; margin: 24px; color: #1a1a1a; background: #fff; }
+        table { border-collapse: collapse; margin-top: 12px; }
+        th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; vertical-align: middle; }
+        code { font-size: 13px; }
+        .ok { color: #2e7d32; font-weight: bold; }
+        .blocked { color: #c62828; font-weight: bold; }
+        #status { padding: 8px 12px; border-radius: 4px; display: inline-block; }
+    </style>
+</head>
+<body>
+    <h3>Cross-Origin-Embedder-Policy: require-corp</h3>
+    <p id="status"></p>
+    <p>
+        Assets are loaded from <code id="origin"></code>, a different origin than this page.
+        <a id="toggle"></a> &middot; Open DevTools &rarr; Console / Network to see the browser's reasons.
+    </p>
+
+    <table>
+        <thead>
+            <tr><th>Request</th><th>Asset response headers</th><th>Result</th></tr>
+        </thead>
+        <tbody id="results"></tbody>
+    </table>
+
+    <p>Images that loaded: <span id="images"></span></p>
+
+    <script>
+        // localhost and 127.0.0.1 are different origins, so the same WAMP server acts as an "external" host
+        const otherHost = location.hostname === '127.0.0.1' ? 'localhost' : '127.0.0.1';
+        const assets = `${location.protocol}//${otherHost}${location.port ? ':' + location.port : ''}` +
+            location.pathname.replace(/[^/]*$/, '') + 'assets/';
+        const isolated = self.crossOriginIsolated;
+
+        document.getElementById('origin').textContent = new URL(assets).origin;
+
+        const status = document.getElementById('status');
+        status.textContent = `crossOriginIsolated = ${isolated}` +
+            (isolated ? ' (COOP + COEP active, SharedArrayBuffer available)' : ' (no COEP, nothing is blocked)');
+        status.style.background = isolated ? '#e3f2fd' : '#fff3e0';
+
+        const toggle = document.getElementById('toggle');
+        toggle.href = isolated ? '?coep=off' : '?';
+        toggle.textContent = isolated ? 'Reload without COEP' : 'Reload with COEP';
+
+        const rows = document.getElementById('results');
+
+        function addRow(request, headers) {
+            const tr = rows.insertRow();
+
+            tr.insertCell().innerHTML = request;
+            tr.insertCell().textContent = headers;
+
+            const result = tr.insertCell();
+            result.textContent = 'loading...';
+
+            return (ok, detail = '') => {
+                result.className = ok ? 'ok' : 'blocked';
+                result.textContent = (ok ? 'loaded' : 'blocked') + (detail ? ` - ${detail}` : '');
+            };
+        }
+
+        function testScript(src, label, headers, crossOrigin) {
+            const done = addRow(`<code>&lt;script${crossOrigin ? ' crossorigin' : ''} src="${label}"&gt;</code>`, headers);
+            const script = document.createElement('script');
+
+            if (crossOrigin) {
+                script.crossOrigin = 'anonymous';
+            }
+
+            script.onload = () => done(true);
+            script.onerror = () => done(false);
+            script.src = src;
+            document.head.appendChild(script);
+        }
+
+        function testImage(file, headers) {
+            const done = addRow(`<code>&lt;img src="${file}"&gt;</code>`, headers);
+            const img = new Image();
+
+            img.alt = file;
+            img.onload = () => {
+                done(true);
+                document.getElementById('images').appendChild(img);
+            };
+            img.onerror = () => done(false);
+            img.src = assets + file;
+        }
+
+        async function testFetch(file, headers, mode) {
+            const done = addRow(`<code>fetch("${file}", { mode: '${mode}' })</code>`, headers);
+
+            try {
+                const response = await fetch(assets + file, { mode, cache: 'no-store' });
+                done(true, `response type "${response.type}"`);
+            } catch (error) {
+                done(false, error.message);
+            }
+        }
+
+        // No-cors embeds: under require-corp the response must carry Cross-Origin-Resource-Policy
+        testScript(assets + 'plain.js', 'plain.js', 'none', false);
+        testScript(assets + 'corp.js', 'corp.js', 'Cross-Origin-Resource-Policy: cross-origin', false);
+
+        // CORS embeds: Access-Control-Allow-Origin is enough, CORP is not needed
+        testScript(assets + 'cors.js', 'cors.js', 'Access-Control-Allow-Origin: *', true);
+        testScript(assets + 'plain.js', 'plain.js', 'none', true);
+
+        testImage('plain.svg', 'none');
+        testImage('corp.svg', 'Cross-Origin-Resource-Policy: cross-origin');
+
+        // fetch() in no-cors mode is checked like an embed, in cors mode like a CORS request
+        testFetch('plain.js', 'none', 'no-cors');
+        testFetch('cors.js', 'Access-Control-Allow-Origin: *', 'cors');
+
+        // A real CDN: jsDelivr sends both CORP: cross-origin and ACAO: *, so it passes either way
+        const cdn = 'https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.min.js';
+        testScript(cdn, 'cdn.jsdelivr.net/.../bootstrap.min.js', 'CORP: cross-origin, ACAO: * (sent by jsDelivr)', false);
+
+        // TradingView sends ACAO: * but no CORP, so only the crossorigin version survives require-corp
+        const tradingView = 'https://s3.tradingview.com/tv.js';
+        testScript(tradingView, 's3.tradingview.com/tv.js', 'ACAO: * only (sent by TradingView)', false);
+        testScript(tradingView, 's3.tradingview.com/tv.js', 'ACAO: * only (sent by TradingView)', true);
+
+        // The Tailwind Play CDN sends neither header: blocked by COEP as a plain tag and by CORS with crossorigin.
+        // Without COEP the plain tag loads and Tailwind's base styles restyle this page slightly.
+        const tailwind = 'https://cdn.tailwindcss.com/3.4.17';
+        testScript(tailwind, 'cdn.tailwindcss.com/3.4.17', 'none (Tailwind Play CDN)', false);
+        testScript(tailwind, 'cdn.tailwindcss.com/3.4.17', 'none (Tailwind Play CDN)', true);
+    </script>
+</body>
+</html>

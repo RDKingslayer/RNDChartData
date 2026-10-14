@@ -1,0 +1,8 @@
+# The parent .htaccess makes every page cross-origin isolated. Add ?coep=off to the demo URL to load
+# the same page without isolation and compare the results.
+<IfModule mod_headers.c>
+    <If "%{QUERY_STRING} =~ /(^|&)coep=off(&|$)/">
+        Header unset Cross-Origin-Opener-Policy
+        Header unset Cross-Origin-Embedder-Policy
+    </If>
+</IfModule>
