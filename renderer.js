@@ -1,9 +1,9 @@
 // Render worker: owns the OffscreenCanvas, the PIXI scene and the viewport (pan / zoom).
-// Reads market data from the data worker's buffers and never writes to them.
+// Never writes to the data worker's shared buffers; in fallback mode it owns its slice and applies deltas to it.
 //
 // Main thread -> INIT { canvas, port, params }, POINTER { type, x, pointerId }, WHEEL { deltaY }
-// Data worker -> DATA_SHARED / DATA_SLICE (see data-worker.js)
-// -> Data worker VIEWPORT { rightOffset, visibleCount }
+// Data worker -> DATA_SHARED / DATA_SLICE / DATA_DELTA (see data-worker.js)
+// -> Data worker VIEWPORT { rightOffset, visibleCount }, RELEASE { ohlcvBuffer, indicatorBuffers }
 
 // importScripts('../lib/pixi-worker-lib.js'); // Import Web Worker support PIXI library
 import * as PIXI from './pixi-worker.min.mjs';
@@ -78,7 +78,7 @@ function init({ canvas, port, params }) {
     const textStyle = new PIXI.TextStyle({
         fontFamily: 'Cairo, sans-serif',
         fontSize: 14,
-        fill: '#11224E',
+        fill: '#FCF1D0',
         fontStyle: 'normal',
         fontWeight: 'bold',
         strokeThickness: 0
@@ -115,6 +115,7 @@ function onDataMessage(event) {
             break;
 
         case 'DATA_SLICE':
+            releaseSlice();
             source = {
                 store: OHLCVStore.from(data.ohlcvBuffer),
                 indicators: wrapIndicators(data.indicatorBuffers),
@@ -124,9 +125,42 @@ function onDataMessage(event) {
             needsRedraw = true;
             break;
 
+        case 'DATA_DELTA':
+            applyDelta(data);
+            break;
+
         default:
             console.warn('Render worker: unknown data message', msgType);
     }
+}
+
+// Fallback: hands the current slice's buffers back to the data worker for reuse. They are detached here
+// afterwards, which is fine because frames are drawn from copies taken in readVisibleBars().
+function releaseSlice() {
+    if (!source || source.store.isShared) {
+        return;
+    }
+
+    const ohlcvBuffer = source.store.buffer;
+    const indicatorBuffers = Object.fromEntries(Object.entries(source.indicators).map(([name, series]) => [name, series.buffer]));
+
+    dataPort.postMessage({ msgType: 'RELEASE', data: { ohlcvBuffer, indicatorBuffers } }, [ohlcvBuffer, ...Object.values(indicatorBuffers)]);
+}
+
+// Fallback live update: rows from startIndex on, already clipped by the data worker to what this slice can hold
+function applyDelta({ startIndex, rows, indicatorValues, totalCount }) {
+    if (rows.length > 0) {
+        const localIndex = startIndex - source.startIndex;
+
+        source.store.setRows(localIndex, rows);
+
+        for (const [name, values] of Object.entries(indicatorValues)) {
+            source.indicators[name].set(values, localIndex);
+        }
+    }
+
+    source.totalCount = totalCount;
+    needsRedraw = true;
 }
 
 function wrapIndicators(buffers) {
@@ -141,12 +175,14 @@ function onTick() {
         return;
     }
 
+    // console.info('onTick');
     const version = source.store.version;
 
     if (!needsRedraw && version === drawnVersion) {
         return;
     }
-
+    //
+    // console.info('onDraw');
     let frame;
 
     // Copy the visible bars out under the sequence lock, then draw from the copy.
@@ -271,6 +307,7 @@ function onPointer({ type, x, pointerId }) {
                 // Dragging right reveals older bars
                 viewport.rightOffset = drag.startOffset + (x - drag.startX) / viewport.barSpacing;
                 onViewportChanged();
+
             }
             break;
 

@@ -112,15 +112,27 @@ export default class OHLCVStore {
         this.data[index * STRIDE + field] = value;
     }
 
-    // Copies rows [from, to) into a new, non-shared store, e.g. to transfer to another thread
-    slice(from, to) {
-        const count = Math.max(0, to - from);
-        const copy = OHLCVStore.create(Math.max(count, 1), false);
+    // Writes whole rows (STRIDE values each) starting at index, extending the count if they run past the end
+    setRows(index, rows) {
+        const end = index + rows.length / STRIDE;
 
-        copy.data.set(this.data.subarray(from * STRIDE, to * STRIDE));
-        Atomics.store(copy.header, COUNT, count);
+        if (index > this.length || end > this.capacity) {
+            throw new RangeError(`OHLCVStore: rows [${index}, ${end}) do not fit (count ${this.length}, capacity ${this.capacity})`);
+        }
 
-        return copy;
+        this.data.set(rows, index * STRIDE);
+
+        if (end > this.length) {
+            Atomics.store(this.header, COUNT, end);
+        }
+    }
+
+    // Replaces the contents of target with rows [from, to) of this store, e.g. to fill a buffer for another thread
+    copyRange(from, to, target) {
+        target.clear();
+        target.setRows(0, this.data.subarray(from * STRIDE, to * STRIDE));
+
+        return target;
     }
 
     // ---- Reader side ----

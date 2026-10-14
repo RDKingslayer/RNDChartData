@@ -62,9 +62,9 @@ function init() {
             port: port2,
             params: {
                 width: 800,
-                height: 600,
+                height: 400,
                 resolution: window.devicePixelRatio,
-                backgroundColor: '#1099bb',
+                backgroundColor: '#010736',
                 backgroundAlpha: 1
             }
         }
