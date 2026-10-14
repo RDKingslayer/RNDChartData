@@ -34,11 +34,53 @@ function forwardInput(canvas, renderWorker) {
     }, { passive: false });
 }
 
+// The canvas belongs to the render worker after transferControlToOffscreen(), so the main thread only
+// measures the container and sends the size; the worker resizes the drawing buffer (CSS keeps the element
+// at 100% of the container). Coalesced to one message per frame, and only sent when something changed.
+function watchSize(container, renderWorker) {
+    let sent = measure(container);
+    let pending = false;
+
+    const check = () => {
+        pending = false;
+
+        const size = measure(container);
+
+        if (size.width !== sent.width || size.height !== sent.height || size.resolution !== sent.resolution) {
+            sent = size;
+            renderWorker.postMessage({ msgType: 'RESIZE', data: size });
+        }
+    };
+
+    const schedule = () => {
+        if (!pending) {
+            pending = true;
+            requestAnimationFrame(check);
+        }
+    };
+
+    new ResizeObserver(schedule).observe(container);
+
+    // Browser zoom or moving to another monitor changes devicePixelRatio, sometimes without a size change
+    window.addEventListener('resize', schedule);
+}
+
+function measure(container) {
+    return {
+        width: Math.max(1, Math.floor(container.clientWidth)),
+        height: Math.max(1, Math.floor(container.clientHeight)),
+        resolution: window.devicePixelRatio
+    };
+}
+
 function init() {
+    const container = document.getElementById('chartContainer');
     const htmlCanvas = document.createElement('canvas');
 
     htmlCanvas.style.touchAction = 'none'; // Let pointer events drive panning on touch screens
-    document.getElementById('chartContainer').appendChild(htmlCanvas);
+    container.appendChild(htmlCanvas);
+
+    const initialSize = measure(container);
 
     const offscreen = htmlCanvas.transferControlToOffscreen();
     const dataWorker = createWorker('./data-worker.js');
@@ -61,9 +103,9 @@ function init() {
             canvas: offscreen,
             port: port2,
             params: {
-                width: 800,
-                height: 400,
-                resolution: window.devicePixelRatio,
+                width: initialSize.width,
+                height: initialSize.height,
+                resolution: initialSize.resolution,
                 backgroundColor: '#010736',
                 backgroundAlpha: 1
             }
@@ -74,6 +116,7 @@ function init() {
     dataWorker.postMessage({ msgType: 'LOAD', data: { symbol: 'DEMO', interval: 60 } });
 
     forwardInput(htmlCanvas, renderWorker);
+    watchSize(container, renderWorker);
 }
 
 init();

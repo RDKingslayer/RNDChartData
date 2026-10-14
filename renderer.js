@@ -1,7 +1,8 @@
 // Render worker: owns the OffscreenCanvas, the PIXI scene and the viewport (pan / zoom).
 // Never writes to the data worker's shared buffers; in fallback mode it owns its slice and applies deltas to it.
 //
-// Main thread -> INIT { canvas, port, params }, POINTER { type, x, pointerId }, WHEEL { deltaY }
+// Main thread -> INIT { canvas, port, params }, RESIZE { width, height, resolution },
+//                POINTER { type, x, pointerId }, WHEEL { deltaY }
 // Data worker -> DATA_SHARED / DATA_SLICE / DATA_DELTA (see data-worker.js)
 // -> Data worker VIEWPORT { rightOffset, visibleCount }, RELEASE { ohlcvBuffer, indicatorBuffers }
 
@@ -52,6 +53,10 @@ self.addEventListener('message', (event) => {
 
         case 'WHEEL':
             onWheel(data);
+            break;
+
+        case 'RESIZE':
+            onResize(data);
             break;
 
         default:
@@ -324,6 +329,18 @@ function onWheel({ deltaY }) {
     const factor = deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
 
     viewport.barSpacing = clamp(viewport.barSpacing * factor, MIN_BAR_SPACING, MAX_BAR_SPACING);
+    onViewportChanged();
+}
+
+// The container changed size (or devicePixelRatio changed). Resizing the renderer sets the canvas's
+// drawing buffer to width x height x resolution; the canvas element's CSS size is handled by the page.
+// More or fewer bars now fit, so the data worker gets a new visibleCount through onViewportChanged().
+function onResize({ width, height, resolution }) {
+    if (app.renderer.resolution !== resolution) {
+        app.renderer.resolution = resolution;
+    }
+
+    app.renderer.resize(width, height);
     onViewportChanged();
 }
 
