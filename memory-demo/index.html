@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Buffer Transfer Memory Test</title>
+    <style>
+        body { font-family: sans-serif; margin: 24px; color: #1a1a1a; background: #fff; }
+        form { display: grid; grid-template-columns: max-content max-content; gap: 6px 12px; align-items: center; margin: 12px 0; }
+        canvas { display: block; border: 1px solid #ccc; }
+        pre { background: #f4f4f4; padding: 10px; margin: 8px 0; font-size: 13px; min-height: 1em; }
+        .muted { color: #555; font-size: 13px; }
+        .buttons { grid-column: 1 / -1; display: flex; gap: 8px; }
+        ol { font-size: 14px; max-width: 900px; }
+    </style>
+    <script src="./main.js" type="module"></script>
+</head>
+<body>
+    <h3>ArrayBuffer transfer memory test</h3>
+    <p class="muted" id="isolation">starting workers...</p>
+
+    <canvas id="chart" width="800" height="300"></canvas>
+
+    <form id="controls">
+        <label for="mode">Mode</label>
+        <select id="mode" name="mode">
+            <option value="transfer-new">Transfer, new buffers every message</option>
+            <option value="transfer-pool">Transfer + ping-pong pool (buffers returned and reused)</option>
+            <option value="clone">Structured clone (copy, no transfer list)</option>
+            <option value="shared">SharedArrayBuffer (no messages)</option>
+        </select>
+
+        <label for="rate">Messages per second</label>
+        <select id="rate" name="rate">
+            <option>60</option>
+            <option>250</option>
+            <option selected>1000</option>
+            <option>5000</option>
+        </select>
+
+        <label for="rows">Rows per message</label>
+        <select id="rows" name="rows">
+            <option value="600" selected>600 (a visible slice)</option>
+            <option value="5000">5,000</option>
+            <option value="50000">50,000 (the full dataset)</option>
+        </select>
+
+        <label for="buffers">Buffers per message</label>
+        <select id="buffers" name="buffers">
+            <option value="1">1 (OHLCV only)</option>
+            <option value="4" selected>4 (OHLCV + 3 indicators)</option>
+            <option value="10">10 (OHLCV + 9 indicators)</option>
+        </select>
+
+        <label for="duration">Duration</label>
+        <select id="duration" name="duration">
+            <option value="1" selected>1 second</option>
+            <option value="5">5 seconds</option>
+            <option value="30">30 seconds</option>
+            <option value="0">Until stopped</option>
+        </select>
+
+        <label for="leak">Simulate a leak</label>
+        <label class="muted"><input type="checkbox" id="leak" name="leak"> consumer keeps every received slice (shows what a real leak looks like)</label>
+
+        <div class="buttons">
+            <button type="submit" id="run" disabled>Run</button>
+            <button type="button" id="stop" disabled>Stop</button>
+            <button type="button" id="measure" disabled>Measure all threads</button>
+        </div>
+    </form>
+
+    <p class="muted" id="perMessage"></p>
+    <pre id="stats"></pre>
+    <pre id="measured" class="muted"></pre>
+
+    <h4>Watching memory in DevTools</h4>
+    <ol>
+        <li><b>Memory tab:</b> the "Select JavaScript VM instance" list shows the page and each worker
+            (<code>producer-worker.js</code>, <code>consumer-worker.js</code>) separately. Pick a worker, choose
+            "Allocations on timeline", start recording, press Run, stop recording after the run.</li>
+        <li>ArrayBuffer contents live outside the JS heap. In a heap snapshot they appear as
+            <code>system / JSArrayBufferData</code> under each ArrayBuffer, and they are not part of
+            <code>performance.memory</code>. The <b>buffers</b> line counts them per worker and works on any page;
+            "Measure all threads" gives the browser's own total but, like SharedArrayBuffer, needs cross-origin isolation.
+            Chrome's Task Manager (Shift+Esc) also shows the whole tab.</li>
+        <li><b>Performance tab</b> with the "Memory" checkbox shows the heap over time with GC drops, which is the easiest
+            way to see a spike and whether it comes back down.</li>
+        <li>Compare a 1-second burst in each mode. Take a heap snapshot (or measure) before the run and a few seconds
+            after it. Memory should return to the baseline in every mode except "Simulate a leak"; starting a new run clears that.</li>
+    </ol>
+</body>
+</html>
