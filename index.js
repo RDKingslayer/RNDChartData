@@ -28,6 +28,9 @@ function forwardInput(canvas, renderWorker) {
     canvas.addEventListener('pointerup', sendPointer('up'));
     canvas.addEventListener('pointercancel', sendPointer('cancel'));
 
+    // Double-click fits the prices to the visible bars again after dragging up or down
+    canvas.addEventListener('dblclick', () => renderWorker.postMessage({ msgType: 'RESET_PRICE_SCALE' }));
+
     canvas.addEventListener('wheel', (e) => {
         e.preventDefault(); // Zoom the chart instead of scrolling the page
         renderWorker.postMessage({ msgType: 'WHEEL', data: { deltaY: e.deltaY, x: e.offsetX } });
