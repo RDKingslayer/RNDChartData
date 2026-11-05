@@ -15,6 +15,7 @@
 
 import OHLCVStore, { canShareMemory } from '../ohlcv-store.js';
 import { createLiveBytes } from './live-bytes.js';
+import { createCpuMeter } from './cpu-meter.js';
 
 const TICK_MS = 10;
 const MAX_SENDS_PER_TICK = 500; // Keeps a too-high rate from locking up the worker
@@ -28,6 +29,7 @@ let timer;
 let stats = createStats();
 const pool = [];
 const live = createLiveBytes();
+const cpu = createCpuMeter();
 
 self.addEventListener('message', (event) => {
     const { msgType, data } = event.data;
@@ -49,7 +51,7 @@ self.addEventListener('message', (event) => {
 
 function init({ port: consumerPort, totalBars }) {
     port = consumerPort;
-    port.onmessage = onConsumerMessage;
+    port.onmessage = cpu.wrap(onConsumerMessage);
 
     // Shared when the page is cross-origin isolated, so the same dataset also serves the "shared" mode
     master = OHLCVStore.create(totalBars, canShareMemory());
@@ -98,6 +100,7 @@ function start(config) {
     run = { ...config, startedAt: performance.now(), sent: 0, seq: 0 };
     stats = createStats();
     pool.length = 0;
+    cpu.reset();
 
     ensureIndicators(config.buffersPerMessage - 1);
     port.postMessage({ msgType: 'RUN', data: { mode: config.mode, leak: config.leak } });
@@ -112,7 +115,7 @@ function start(config) {
         run.scratch = allocateSet(config.rows, config.buffersPerMessage - 1);
     }
 
-    timer = setInterval(tick, TICK_MS);
+    timer = setInterval(cpu.wrap(tick), TICK_MS);
 }
 
 function stop() {
@@ -244,5 +247,5 @@ function createStats() {
 }
 
 function postStats() {
-    self.postMessage({ msgType: 'STATS', data: { ...stats, pooled: pool.length, running: Boolean(run), liveBytes: live.counter.bytes, collected: live.counter.collected } });
+    self.postMessage({ msgType: 'STATS', data: { ...stats, pooled: pool.length, running: Boolean(run), ...cpu.sample(), liveBytes: live.counter.bytes, collected: live.counter.collected } });
 }

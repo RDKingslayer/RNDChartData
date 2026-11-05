@@ -8,6 +8,7 @@
 
 import OHLCVStore from '../ohlcv-store.js';
 import { createLiveBytes } from './live-bytes.js';
+import { createCpuMeter } from './cpu-meter.js';
 
 const STATS_MS = 250;
 const BAR_WIDTH = 3;
@@ -23,6 +24,7 @@ let dirty = false;
 let retained = []; // Leak simulation: every slice ever received stays reachable
 let stats = createStats();
 const live = createLiveBytes();
+const cpu = createCpuMeter();
 
 self.addEventListener('message', (event) => {
     const { msgType, data } = event.data;
@@ -31,7 +33,7 @@ self.addEventListener('message', (event) => {
         canvas = data.canvas;
         ctx = canvas.getContext('2d');
         port = data.port;
-        port.onmessage = onProducerMessage;
+        port.onmessage = cpu.wrap(onProducerMessage);
         setInterval(postStats, STATS_MS);
         requestFrame();
     }
@@ -47,6 +49,7 @@ function onProducerMessage(event) {
             latest = undefined;
             retained = [];
             stats = createStats();
+            cpu.reset();
             break;
 
         case 'SLICE':
@@ -107,11 +110,13 @@ function wrap({ ohlcvBuffer, indicatorBuffers }) {
 
 function requestFrame() {
     if (typeof self.requestAnimationFrame === 'function') {
-        self.requestAnimationFrame(onFrame);
+        self.requestAnimationFrame(timedFrame);
     } else {
-        setTimeout(onFrame, 16);
+        setTimeout(timedFrame, 16);
     }
 }
+
+const timedFrame = cpu.wrap(onFrame);
 
 function onFrame() {
     requestFrame();
@@ -193,6 +198,6 @@ function createStats() {
 }
 
 function postStats() {
-    self.postMessage({ msgType: 'STATS', data: { ...stats, retainedSlices: retained.length, liveBytes: live.counter.bytes, collected: live.counter.collected } });
+    self.postMessage({ msgType: 'STATS', data: { ...stats, retainedSlices: retained.length, ...cpu.sample(), liveBytes: live.counter.bytes, collected: live.counter.collected } });
 }
 

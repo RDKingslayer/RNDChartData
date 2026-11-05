@@ -18,6 +18,10 @@ const producerStats = {};
 const consumerStats = {};
 let peakHeap = 0;
 let peakBuffers = 0;
+let wasRunning = false;
+let lastConfig;
+let runCount = 0;
+const history = [];
 
 function createWorker(path) {
     const worker = new Worker(new URL(path, import.meta.url), { type: 'module' });
@@ -89,7 +93,9 @@ form.addEventListener('submit', (e) => {
     e.preventDefault();
     peakHeap = 0;
     peakBuffers = 0;
-    producer.postMessage({ msgType: 'RUN', data: readConfig() });
+    lastConfig = readConfig();
+    runCount++;
+    producer.postMessage({ msgType: 'RUN', data: lastConfig });
 });
 
 stopButton.addEventListener('click', () => producer.postMessage({ msgType: 'STOP' }));
@@ -139,8 +145,45 @@ function render() {
         `           latency ${(c.latencyMs ?? 0).toFixed(1)} ms   leaked slices ${c.retainedSlices ?? 0} (${formatBytes(c.retainedBytes ?? 0)})`,
         `buffers    producer ${formatBytes(p.liveBytes ?? 0)}   consumer ${formatBytes(c.liveBytes ?? 0)}   total ${formatBytes(buffers)}   peak ${formatBytes(peakBuffers)}`,
         `           collected by GC: producer ${p.collected ?? 0}, consumer ${c.collected ?? 0}   (held = still referenced or not yet collected)`,
-        heap ? `main heap  ${formatBytes(heap)}   peak ${formatBytes(peakHeap)}   (main thread only)` : 'main heap  n/a (performance.memory is Chrome-only)'
+        heap ? `main heap  ${formatBytes(heap)}   peak ${formatBytes(peakHeap)}   (main thread only)` : 'main heap  n/a (performance.memory is Chrome-only)',
+        `cpu        producer ${(p.cpuPercent ?? 0).toFixed(0)}% (peak ${(p.cpuPeakPercent ?? 0).toFixed(0)}%, busy ${formatUs(p.cpuBusyMs)})   consumer ${(c.cpuPercent ?? 0).toFixed(0)}% (peak ${(c.cpuPeakPercent ?? 0).toFixed(0)}%, busy ${formatUs(c.cpuBusyMs)})   (share of one core)`,
+        p.timerUs > 50 ? `           timer resolution ${p.timerUs.toFixed(0)} us: too coarse for short callbacks, so cpu reads low or 0. Serve with COOP/COEP headers (cross-origin isolation) for ~5 us.` : ''
     ].join('\n');
+
+    recordFinishedRun(p, c);
+}
+
+// Keeps one line per finished run so modes can be compared side by side
+function recordFinishedRun(p, c) {
+    if (wasRunning && !p.running) {
+        const config = lastConfig;
+        const runId = runCount;
+
+        // The consumer reports every 250 ms, so wait for its final numbers before writing the line
+        setTimeout(() => {
+            if (runId !== runCount) {
+                return; // A new run already started and reset the stats
+            }
+
+            const { mode, rate, rows, buffersPerMessage } = config;
+            const busy = (p.cpuBusyMs ?? 0) + (c.cpuBusyMs ?? 0);
+            const perMessageUs = p.sent ? busy * 1000 / p.sent : 0;
+
+            history.push(
+                `${mode.padEnd(14)} ${String(rate).padStart(5)}/s ${String(rows).padStart(6)} rows ${String(buffersPerMessage).padStart(2)} buf` +
+                `   cpu producer ${formatUs(p.cpuBusyMs).padStart(10)}   consumer ${formatUs(c.cpuBusyMs).padStart(10)}` +
+                `   ${perMessageUs.toFixed(1)} us/msg   peak buffers ${formatBytes(peakBuffers)}`
+            );
+            document.getElementById('history').textContent = history.join('\n');
+        }, 600);
+    }
+
+    wasRunning = Boolean(p.running);
+}
+
+// The meter keeps milliseconds; shown as whole microseconds
+function formatUs(ms = 0) {
+    return `${Math.round(ms * 1000).toLocaleString()} us`;
 }
 
 function formatBytes(bytes) {
