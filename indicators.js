@@ -1,8 +1,6 @@
 // Indicator calculations. Each output series is a Float64Array aligned with the
 // OHLCV store, so out[i] belongs to bar i. Bars without enough history are NaN.
 
-import { Field } from './ohlcv-store.js';
-
 export function createSeries(capacity, shared) {
     const byteLength = capacity * Float64Array.BYTES_PER_ELEMENT;
     const series = new Float64Array(shared ? new SharedArrayBuffer(byteLength) : new ArrayBuffer(byteLength));
@@ -16,6 +14,7 @@ export function createSeries(capacity, shared) {
 // Pass the index of the first changed bar to keep live updates cheap.
 export function calculateSMA(store, out, period, fromIndex = 0) {
     const count = store.length;
+    const close = store.close;
 
     for (let i = fromIndex; i < count; i++) {
         if (i < period - 1) {
@@ -26,7 +25,7 @@ export function calculateSMA(store, out, period, fromIndex = 0) {
         let sum = 0;
 
         for (let j = i - period + 1; j <= i; j++) {
-            sum += store.get(j, Field.CLOSE);
+            sum += close[j];
         }
 
         out[i] = sum / period;

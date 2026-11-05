@@ -1,9 +1,9 @@
-// Fixed-capacity OHLCV store backed by a single (Shared)ArrayBuffer.
+// Fixed-capacity OHLCV store backed by a single (Shared)ArrayBuffer using a columnar layout.
 //
 // Memory layout:
-//   bytes 0..15  header  Int32Array [version, count, capacity, reserved]
-//   bytes 16..   rows    Float64Array, STRIDE values per row:
-//                        [time, open, high, low, close, volume]
+//   bytes 0..15  header   Int32Array [version, count, capacity, reserved]
+//   bytes 16..   columns  6 Float64Arrays, capacity values each:
+//                         time, open, high, low, close, volume
 //
 // The same buffer can be wrapped on any thread with OHLCVStore.from(buffer).
 //
@@ -21,7 +21,7 @@ export const Field = Object.freeze({
     VOLUME: 5
 });
 
-export const STRIDE = 6;
+export const NUM_FIELDS = 6;
 
 const HEADER_INTS = 4;
 const HEADER_BYTES = HEADER_INTS * Int32Array.BYTES_PER_ELEMENT; // 16, keeps the Float64Array 8-byte aligned
@@ -35,24 +35,36 @@ export function canShareMemory() {
 
 export default class OHLCVStore {
     static create(capacity, shared = canShareMemory()) {
-        const byteLength = HEADER_BYTES + capacity * STRIDE * Float64Array.BYTES_PER_ELEMENT;
+        const byteLength = HEADER_BYTES + capacity * NUM_FIELDS * Float64Array.BYTES_PER_ELEMENT;
         const buffer = shared ? new SharedArrayBuffer(byteLength) : new ArrayBuffer(byteLength);
-        const store = new OHLCVStore(buffer);
+        const header = new Int32Array(buffer, 0, HEADER_INTS);
 
-        Atomics.store(store.header, CAPACITY, capacity);
+        Atomics.store(header, CAPACITY, capacity);
 
-        return store;
+        return new OHLCVStore(buffer, capacity);
     }
 
     static from(buffer) {
         return new OHLCVStore(buffer);
     }
 
-    constructor(buffer) {
+    constructor(buffer, initialCapacity) {
         this.buffer = buffer;
         this.isShared = typeof SharedArrayBuffer !== 'undefined' && buffer instanceof SharedArrayBuffer;
         this.header = new Int32Array(buffer, 0, HEADER_INTS);
-        this.data = new Float64Array(buffer, HEADER_BYTES);
+
+        const capacity = initialCapacity ?? Atomics.load(this.header, CAPACITY);
+        const colBytes = capacity * Float64Array.BYTES_PER_ELEMENT;
+
+        let offset = HEADER_BYTES;
+        this.time = new Float64Array(buffer, offset, capacity); offset += colBytes;
+        this.open = new Float64Array(buffer, offset, capacity); offset += colBytes;
+        this.high = new Float64Array(buffer, offset, capacity); offset += colBytes;
+        this.low = new Float64Array(buffer, offset, capacity); offset += colBytes;
+        this.close = new Float64Array(buffer, offset, capacity); offset += colBytes;
+        this.volume = new Float64Array(buffer, offset, capacity);
+
+        this.columns = [this.time, this.open, this.high, this.low, this.close, this.volume];
     }
 
     get version() {
@@ -98,29 +110,54 @@ export default class OHLCVStore {
     }
 
     setRow(index, time, open, high, low, close, volume) {
-        const offset = index * STRIDE;
-
-        this.data[offset + Field.TIME] = time;
-        this.data[offset + Field.OPEN] = open;
-        this.data[offset + Field.HIGH] = high;
-        this.data[offset + Field.LOW] = low;
-        this.data[offset + Field.CLOSE] = close;
-        this.data[offset + Field.VOLUME] = volume;
+        this.time[index] = time;
+        this.open[index] = open;
+        this.high[index] = high;
+        this.low[index] = low;
+        this.close[index] = close;
+        this.volume[index] = volume;
     }
 
     set(index, field, value) {
-        this.data[index * STRIDE + field] = value;
+        this.columns[field][index] = value;
     }
 
-    // Writes whole rows (STRIDE values each) starting at index, extending the count if they run past the end
+    setColumns(index, columns) {
+        const count = columns[0].length;
+        const end = index + count;
+
+        if (index > this.length || end > this.capacity) {
+            throw new RangeError(`OHLCVStore: columns [${index}, ${end}) do not fit (count ${this.length}, capacity ${this.capacity})`);
+        }
+
+        for (let f = 0; f < NUM_FIELDS; f++) {
+            this.columns[f].set(columns[f], index);
+        }
+
+        if (end > this.length) {
+            Atomics.store(this.header, COUNT, end);
+        }
+    }
+
+    // Writes whole rows starting at index, extending the count if they run past the end
     setRows(index, rows) {
-        const end = index + rows.length / STRIDE;
+        const rowCount = rows.length / NUM_FIELDS;
+        const end = index + rowCount;
 
         if (index > this.length || end > this.capacity) {
             throw new RangeError(`OHLCVStore: rows [${index}, ${end}) do not fit (count ${this.length}, capacity ${this.capacity})`);
         }
 
-        this.data.set(rows, index * STRIDE);
+        for (let i = 0; i < rowCount; i++) {
+            const offset = i * NUM_FIELDS;
+            const targetIdx = index + i;
+            this.time[targetIdx] = rows[offset + Field.TIME];
+            this.open[targetIdx] = rows[offset + Field.OPEN];
+            this.high[targetIdx] = rows[offset + Field.HIGH];
+            this.low[targetIdx] = rows[offset + Field.LOW];
+            this.close[targetIdx] = rows[offset + Field.CLOSE];
+            this.volume[targetIdx] = rows[offset + Field.VOLUME];
+        }
 
         if (end > this.length) {
             Atomics.store(this.header, COUNT, end);
@@ -130,7 +167,13 @@ export default class OHLCVStore {
     // Replaces the contents of target with rows [from, to) of this store, e.g. to fill a buffer for another thread
     copyRange(from, to, target) {
         target.clear();
-        target.setRows(0, this.data.subarray(from * STRIDE, to * STRIDE));
+        const count = to - from;
+
+        for (let f = 0; f < NUM_FIELDS; f++) {
+            target.columns[f].set(this.columns[f].subarray(from, to), 0);
+        }
+
+        Atomics.store(target.header, COUNT, count);
 
         return target;
     }
@@ -153,19 +196,17 @@ export default class OHLCVStore {
     }
 
     get(index, field) {
-        return this.data[index * STRIDE + field];
+        return this.columns[field][index];
     }
 
     getRow(index) {
-        const offset = index * STRIDE;
-
         return {
-            time: this.data[offset + Field.TIME],
-            open: this.data[offset + Field.OPEN],
-            high: this.data[offset + Field.HIGH],
-            low: this.data[offset + Field.LOW],
-            close: this.data[offset + Field.CLOSE],
-            volume: this.data[offset + Field.VOLUME]
+            time: this.time[index],
+            open: this.open[index],
+            high: this.high[index],
+            low: this.low[index],
+            close: this.close[index],
+            volume: this.volume[index]
         };
     }
 }

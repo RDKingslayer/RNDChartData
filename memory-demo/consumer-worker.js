@@ -6,7 +6,7 @@
 // -> Producer    RELEASE { ohlcvBuffer, indicatorBuffers }  (transfer-pool mode)
 // -> Main thread STATS { ... }
 
-import OHLCVStore, { Field } from '../ohlcv-store.js';
+import OHLCVStore from '../ohlcv-store.js';
 import { createLiveBytes } from './live-bytes.js';
 
 const STATS_MS = 250;
@@ -150,8 +150,8 @@ function draw(store) {
     let max = -Infinity;
 
     for (let i = first; i < count; i++) {
-        min = Math.min(min, store.get(i, Field.LOW));
-        max = Math.max(max, store.get(i, Field.HIGH));
+        min = Math.min(min, store.low[i]);
+        max = Math.max(max, store.high[i]);
     }
 
     const range = max - min || 1;
@@ -162,11 +162,11 @@ function draw(store) {
 
     for (let i = first; i < count; i++) {
         const x = (i - first) * BAR_WIDTH;
-        const open = store.get(i, Field.OPEN);
-        const close = store.get(i, Field.CLOSE);
+        const open = store.open[i];
+        const close = store.close[i];
 
         ctx.fillStyle = close >= open ? '#00C853' : '#FF5252';
-        ctx.fillRect(x, toY(store.get(i, Field.HIGH)), 1, Math.max(1, toY(store.get(i, Field.LOW)) - toY(store.get(i, Field.HIGH))));
+        ctx.fillRect(x, toY(store.high[i]), 1, Math.max(1, toY(store.low[i]) - toY(store.high[i])));
         ctx.fillRect(x - 1, toY(Math.max(open, close)), BAR_WIDTH - 1, Math.max(1, Math.abs(toY(open) - toY(close))));
     }
 

@@ -13,7 +13,7 @@
 //   clone          postMessage without a transfer list: the same scratch buffers are copied on every send
 //   shared         SharedArrayBuffer handed over once, then only written to; no messages at all
 
-import OHLCVStore, { Field, canShareMemory } from '../ohlcv-store.js';
+import OHLCVStore, { canShareMemory } from '../ohlcv-store.js';
 import { createLiveBytes } from './live-bytes.js';
 
 const TICK_MS = 10;
@@ -153,11 +153,11 @@ function sendOne() {
         // A live tick written in place; the consumer notices the version change on its next frame
         master.write((s) => {
             const last = s.length - 1;
-            const close = s.get(last, Field.CLOSE) + (Math.random() - 0.5) * 0.05;
+            const close = s.close[last] + (Math.random() - 0.5) * 0.05;
 
-            s.set(last, Field.CLOSE, close);
-            s.set(last, Field.HIGH, Math.max(s.get(last, Field.HIGH), close));
-            s.set(last, Field.LOW, Math.min(s.get(last, Field.LOW), close));
+            s.close[last] = close;
+            s.high[last] = Math.max(s.high[last], close);
+            s.low[last] = Math.min(s.low[last], close);
         });
         return;
     }
@@ -231,7 +231,7 @@ function ensureIndicators(count) {
         const series = new Float64Array(master.isShared ? new SharedArrayBuffer(bytes) : new ArrayBuffer(bytes));
 
         for (let i = 0; i < master.length; i++) {
-            series[i] = master.get(Math.max(0, i - shift), Field.CLOSE);
+            series[i] = master.close[Math.max(0, i - shift)];
         }
 
         live.track(series.buffer);

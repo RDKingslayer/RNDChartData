@@ -10,7 +10,7 @@
 // with the context scaled by the device pixel ratio so lines and text stay sharp.
 
 import PlotInfo from './plot-info.js';
-import OHLCVStore, { Field, STRIDE } from './ohlcv-store.js';
+import OHLCVStore from './ohlcv-store.js';
 
 const PADDING = 30;
 const MIN_BAR_SPACING = 2;
@@ -174,9 +174,17 @@ function releaseSlice() {
     dataPort.postMessage({ msgType: 'RELEASE', data: { ohlcvBuffer, indicatorBuffers } }, [ohlcvBuffer, ...Object.values(indicatorBuffers)]);
 }
 
-// Fallback live update: rows from startIndex on, already clipped by the data worker to what this slice can hold
-function applyDelta({ startIndex, rows, indicatorValues, totalCount }) {
-    if (rows.length > 0) {
+// Fallback live update: columns from startIndex on, already clipped by the data worker to what this slice can hold
+function applyDelta({ startIndex, columns, rows, indicatorValues, totalCount }) {
+    if (columns && columns[0].length > 0) {
+        const localIndex = startIndex - source.startIndex;
+
+        source.store.setColumns(localIndex, columns);
+
+        for (const [name, values] of Object.entries(indicatorValues)) {
+            source.indicators[name].set(values, localIndex);
+        }
+    } else if (rows && rows.length > 0) {
         const localIndex = startIndex - source.startIndex;
 
         source.store.setRows(localIndex, rows);
@@ -239,8 +247,14 @@ function readVisibleBars() {
     return {
         total,
         from,
+        barCount: localTo - localFrom,
         firstIndex: startIndex + localFrom,
-        rows: store.data.slice(localFrom * STRIDE, localTo * STRIDE),
+        time: store.time.slice(localFrom, localTo),
+        open: store.open.slice(localFrom, localTo),
+        high: store.high.slice(localFrom, localTo),
+        low: store.low.slice(localFrom, localTo),
+        close: store.close.slice(localFrom, localTo),
+        volume: store.volume.slice(localFrom, localTo),
         sma: indicators.sma.slice(localFrom, localTo)
     };
 }
@@ -248,7 +262,7 @@ function readVisibleBars() {
 // Paints the whole chart: background, then (clipped to the plot area) grid, candles and SMA, then axes and text
 function drawFrame(frame) {
     const area = getPlotArea();
-    const barCount = frame ? frame.rows.length / STRIDE : 0;
+    const barCount = frame ? frame.barCount : 0;
 
     // Work in CSS pixels from here on
     ctx.setTransform(screen.resolution, 0, 0, screen.resolution, 0, 0);
@@ -260,10 +274,9 @@ function drawFrame(frame) {
         return;
     }
 
-    const { total, from, firstIndex, rows, sma } = frame;
+    const { total, from, firstIndex, time, open, high, low, close, volume, sma } = frame;
     const spacing = viewport.barSpacing;
     const bodyWidth = Math.max(1, spacing * 0.7);
-    const field = (k, f) => rows[k * STRIDE + f];
     const toX = (k) => area.left + (firstIndex + k - from) * spacing;
     const centerX = (k) => toX(k) + bodyWidth / 2;
 
@@ -271,8 +284,8 @@ function drawFrame(frame) {
     let maxPrice = -Infinity;
 
     for (let k = 0; k < barCount; k++) {
-        minPrice = Math.min(minPrice, field(k, Field.LOW));
-        maxPrice = Math.max(maxPrice, field(k, Field.HIGH));
+        minPrice = Math.min(minPrice, low[k]);
+        maxPrice = Math.max(maxPrice, high[k]);
     }
 
     const priceRange = maxPrice - minPrice || 1;
@@ -281,7 +294,7 @@ function drawFrame(frame) {
     const toPrice = (y) => maxPrice - (y - area.top - viewport.priceOffset) / pxPerPrice;
 
     const priceTicks = getPriceTicks(area, toY, toPrice(area.bottom), toPrice(0));
-    const timeTicks = getTimeTicks(area, barCount, field, centerX);
+    const timeTicks = getTimeTicks(area, barCount, time, centerX);
 
     // Candles and the SMA are clipped to the plot area, so they never run over the axes while dragging
     ctx.save();
@@ -290,7 +303,7 @@ function drawFrame(frame) {
     ctx.clip();
 
     drawGrid(area, priceTicks, timeTicks);
-    drawCandles(barCount, field, toX, toY, bodyWidth);
+    drawCandles(barCount, open, high, low, close, toX, toY, bodyWidth);
     drawSma(barCount, sma, centerX, toY);
 
     ctx.restore();
@@ -302,12 +315,12 @@ function drawFrame(frame) {
     const last = barCount - 1;
     const lastSma = sma[last];
 
-    drawLastPrice(area, field(last, Field.CLOSE), field(last, Field.OPEN), toY);
+    drawLastPrice(area, close[last], open[last], toY);
 
     drawInfo(`Bars: ${total} (shared: ${source.store.isShared})  ` +
-        `O ${field(last, Field.OPEN).toFixed(2)}  H ${field(last, Field.HIGH).toFixed(2)}  ` +
-        `L ${field(last, Field.LOW).toFixed(2)}  C ${field(last, Field.CLOSE).toFixed(2)}  ` +
-        `V ${field(last, Field.VOLUME)}  SMA ${Number.isNaN(lastSma) ? '-' : lastSma.toFixed(2)}`);
+        `O ${open[last].toFixed(2)}  H ${high[last].toFixed(2)}  ` +
+        `L ${low[last].toFixed(2)}  C ${close[last].toFixed(2)}  ` +
+        `V ${volume[last]}  SMA ${Number.isNaN(lastSma) ? '-' : lastSma.toFixed(2)}`);
 }
 
 function clearBackground() {
@@ -319,23 +332,23 @@ function clearBackground() {
 }
 
 // One path per colour for wicks and one for bodies, so the whole series costs four draw calls
-function drawCandles(barCount, field, toX, toY, bodyWidth) {
+function drawCandles(barCount, open, high, low, close, toX, toY, bodyWidth) {
     const paths = {
         up: { wicks: new Path2D(), bodies: new Path2D() },
         down: { wicks: new Path2D(), bodies: new Path2D() }
     };
 
     for (let k = 0; k < barCount; k++) {
-        const open = field(k, Field.OPEN);
-        const close = field(k, Field.CLOSE);
-        const { wicks, bodies } = close >= open ? paths.up : paths.down;
+        const o = open[k];
+        const c = close[k];
+        const { wicks, bodies } = c >= o ? paths.up : paths.down;
         const x = toX(k);
         const wickX = Math.round(x + bodyWidth / 2) + 0.5;
-        const bodyTop = toY(Math.max(open, close));
+        const bodyTop = toY(Math.max(o, c));
 
-        wicks.moveTo(wickX, toY(field(k, Field.HIGH)));
-        wicks.lineTo(wickX, toY(field(k, Field.LOW)));
-        bodies.rect(x, bodyTop, bodyWidth, Math.max(1, toY(Math.min(open, close)) - bodyTop));
+        wicks.moveTo(wickX, toY(high[k]));
+        wicks.lineTo(wickX, toY(low[k]));
+        bodies.rect(x, bodyTop, bodyWidth, Math.max(1, toY(Math.min(o, c)) - bodyTop));
     }
 
     ctx.lineWidth = 1;
@@ -444,29 +457,29 @@ function getPriceTicks(area, toY, lowPrice, highPrice) {
 
 // The first bar of each time step, as { x, label }. The step is the smallest round duration that keeps
 // labels MIN_TIME_LABEL_SPACING apart at the current zoom.
-function getTimeTicks(area, barCount, field, centerX) {
-    const interval = barCount > 1 ? field(1, Field.TIME) - field(0, Field.TIME) : 60;
+function getTimeTicks(area, barCount, time, centerX) {
+    const interval = barCount > 1 ? time[1] - time[0] : 60;
     const minStep = interval * Math.ceil(MIN_TIME_LABEL_SPACING / viewport.barSpacing);
     const step = TIME_STEPS.find((s) => s >= minStep) ?? TIME_STEPS[TIME_STEPS.length - 1];
     const ticks = [];
     let lastX = -Infinity;
-    let previous = localTime(field(0, Field.TIME));
+    let previous = localTime(time[0]);
 
     for (let k = 1; k < barCount; k++) {
-        const time = localTime(field(k, Field.TIME));
+        const t = localTime(time[k]);
 
-        if (Math.floor(time / step) !== Math.floor(previous / step)) {
+        if (Math.floor(t / step) !== Math.floor(previous / step)) {
             const x = Math.round(centerX(k)) + 0.5;
-            const newDay = Math.floor(time / 86400) !== Math.floor(previous / 86400);
+            const newDay = Math.floor(t / 86400) !== Math.floor(previous / 86400);
 
             // Gaps in the data can put two step boundaries close together; keep the labels apart anyway
             if (x - lastX >= MIN_TIME_LABEL_SPACING * 0.6 && x < area.right - 20) {
-                ticks.push({ x, label: formatTime(time, step, newDay) });
+                ticks.push({ x, label: formatTime(t, step, newDay) });
                 lastX = x;
             }
         }
 
-        previous = time;
+        previous = t;
     }
 
     return ticks;

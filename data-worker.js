@@ -5,14 +5,14 @@
 //                 RELEASE  { ohlcvBuffer, indicatorBuffers }  (fallback: a slice the renderer no longer needs)
 // -> Renderer     DATA_SHARED { ohlcvBuffer, indicatorBuffers }            (once, shared memory)
 //                 DATA_SLICE  { ohlcvBuffer, indicatorBuffers, startIndex, totalCount } (fallback)
-//                 DATA_DELTA  { startIndex, rows, indicatorValues, totalCount }        (fallback, live updates)
+//                 DATA_DELTA  { startIndex, columns, indicatorValues, totalCount }     (fallback, live updates)
 // -> Main thread  STATUS { ... }
 //
 // Fallback buffers ping-pong: every DATA_SLICE is transferred to the renderer, which transfers the
 // previous one back with RELEASE, so slices are filled into recycled buffers instead of new ones.
-// Live ticks only send the changed rows (DATA_DELTA), which the renderer writes into its current slice.
+// Live ticks only send the changed columns (DATA_DELTA), which the renderer writes into its current slice.
 
-import OHLCVStore, { Field, STRIDE } from './ohlcv-store.js';
+import OHLCVStore, { Field } from './ohlcv-store.js';
 import { createSeries, calculateSMA } from './indicators.js';
 
 const SMA_PERIOD = 20;
@@ -142,10 +142,10 @@ function startFeed() {
 
     feedTimer = setInterval(() => {
         const last = store.length - 1;
-        const lastClose = store.get(last, Field.CLOSE);
+        const lastClose = store.close[last];
 
         if (++ticks % TICKS_PER_BAR === 0) {
-            applyTick({ newBar: randomBar(store.get(last, Field.TIME) + barInterval, lastClose) });
+            applyTick({ newBar: randomBar(store.time[last] + barInterval, lastClose) });
         } else {
             applyTick({ price: Math.max(0.01, lastClose + (Math.random() - 0.5) * 0.05), volume: Math.round(Math.random() * 500) });
         }
@@ -172,10 +172,10 @@ function applyTick({ price, volume, newBar }) {
             changedIndex = s.push(...newBar);
         } else {
             changedIndex = s.length - 1;
-            s.set(changedIndex, Field.CLOSE, price);
-            s.set(changedIndex, Field.HIGH, Math.max(s.get(changedIndex, Field.HIGH), price));
-            s.set(changedIndex, Field.LOW, Math.min(s.get(changedIndex, Field.LOW), price));
-            s.set(changedIndex, Field.VOLUME, s.get(changedIndex, Field.VOLUME) + volume);
+            s.close[changedIndex] = price;
+            s.high[changedIndex] = Math.max(s.high[changedIndex], price);
+            s.low[changedIndex] = Math.min(s.low[changedIndex], price);
+            s.volume[changedIndex] += volume;
         }
 
         // Only bars from changedIndex onwards are affected
@@ -231,13 +231,13 @@ function sendSlice() {
     }, [slice.buffer, ...Object.values(indicatorBuffers)]);
 }
 
-// Sends the rows from changedIndex to the end that the renderer's slice can hold, as long as the visible
+// Sends the columns from changedIndex to the end that the renderer's slice can hold, as long as the visible
 // range is still fully covered afterwards. Returns false when a whole new slice is needed instead.
 function sendDelta(changedIndex) {
     const count = store.length;
     const { from, to, capacity } = rendererSlice;
 
-    // Rows can only be overwritten or appended right after the slice's last row, up to its capacity.
+    // Columns can only be overwritten or appended right after the slice's last bar, up to its capacity.
     // If the slice ends before changedIndex (scrolled far back) there is nothing to write, only totalCount.
     const start = Math.max(changedIndex, from);
     const end = start <= to ? Math.min(count, from + capacity) : start;
@@ -250,15 +250,15 @@ function sendDelta(changedIndex) {
         return false;
     }
 
-    const rows = store.data.slice(start * STRIDE, end * STRIDE);
+    const columns = store.columns.map((col) => col.slice(start, end));
     const indicatorValues = mapObject(indicators, (series) => series.slice(start, end));
 
     rendererSlice.to = newTo;
 
     rendererPort.postMessage({
         msgType: 'DATA_DELTA',
-        data: { startIndex: start, rows, indicatorValues, totalCount: count }
-    }, [rows.buffer, ...Object.values(indicatorValues).map((values) => values.buffer)]);
+        data: { startIndex: start, columns, indicatorValues, totalCount: count }
+    }, [...columns.map((col) => col.buffer), ...Object.values(indicatorValues).map((values) => values.buffer)]);
 
     return true;
 }
@@ -310,7 +310,7 @@ function mapObject(object, fn) {
 function randomBar(time, open) {
     const close = Math.max(0.01, open + (Math.random() - 0.5) * 0.4);
     const high = Math.max(open, close) + Math.random() * 0.1;
-    const low = Math.max(0.01, Math.min(open, close) - Math.random() * 0.1);
+    const low = Math.max(0.01, Math.min(open, close)) - Math.random() * 0.1;
     const volume = Math.round(Math.random() * 50000);
 
     return [time, open, high, low, close, volume];
